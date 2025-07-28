@@ -107,7 +107,7 @@ async function purgeCloudflareCache(url) {
   }
 }
 
-async function warmUrls(urls, country, batchSize = 3, delay = 5000) {
+async function warmUrls(urls, country, batchSize = 1, delay = 2000) {
   const proxy = PROXIES[country];
   const agent = new HttpsProxyAgent(proxy);
 
@@ -132,7 +132,7 @@ async function warmUrls(urls, country, batchSize = 3, delay = 5000) {
          console.log(`[${country}] ${res.status} cf=${cfCache} ls=${lsCache} edge=${cfEdge} - ${url}`);
 
           if (lsCache.toLowerCase() !== "hit") {
-            await purgeCloudflareCache(url); // biar WP bisa re-render
+            await purgeCloudflareCache(url);
           }
         } catch (err) {
           console.warn(`[${country}] ❌ Failed to warm ${url}: ${err?.message}`);

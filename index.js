@@ -6,15 +6,15 @@ import * as dotenv from "dotenv";
 dotenv.config();
 
 const DOMAINS_MAP = {
-  tw: "https://penidadivecenter.tw",
+  id: "https://seoboost.co.id",
 };
 
 const PROXIES = {
-  tw: process.env.BRD_PROXY_TW,
+  id: process.env.BRD_PROXY_ID,
 };
 
 const USER_AGENTS = {
-  tw: "PenidaDiveCenter-CacheWarmer-TW/1.0",
+  id: "SeoBoost-CacheWarmer-ID/1.0",
 };
 
 const CLOUDFLARE_ZONE_ID = process.env.CLOUDFLARE_ZONE_ID;

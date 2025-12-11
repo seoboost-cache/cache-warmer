@@ -2,7 +2,12 @@ name: Run Cache Warmer Every Days 2 Times
 
 on:
   schedule:
-   - cron: "0,15,30,45 6 * * *"   
+    - cron: "0 0 * * *"     # 08:00 WITA – crawl #1
+    - cron: "20 0 * * *"     # 08:05 WITA – crawl #2
+
+    # Batch 2 (night)
+    - cron: "0 12 * * *"    # 20:00 WITA – crawl #3
+    - cron: "20 12 * * *"    # 20:05 WITA – crawl #4   
   workflow_dispatch:
 
 jobs:

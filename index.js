@@ -28,6 +28,24 @@ const USER_AGENTS = {
 const CLOUDFLARE_ZONE_ID = process.env.CLOUDFLARE_ZONE_ID;
 const CLOUDFLARE_API_TOKEN = process.env.CLOUDFLARE_API_TOKEN;
 
+/* ====== APPS SHEET HEADERS (no vercel_id) ======
+   Pastikan Apps Script DEFAULT_HEADER sama susunannya.
+*/
+const APPS_SHEET_HEADERS = [
+  "run_id",
+  "started_at",
+  "finished_at",
+  "country",
+  "url",
+  "status",
+  "cf_cache",
+  "vercel_cache",
+  "cf_ray",
+  "response_ms",
+  "error",
+  "message",
+];
+
 /* ====== UTIL ====== */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const cryptoRandomId = () =>
@@ -60,7 +78,6 @@ class AppsScriptLogger {
     cfCache = "",
     vcCache = "",
     cfRay = "",
-    vercelId = "",
     responseMs = "",
     error = 0,
     message = "",
@@ -69,13 +86,12 @@ class AppsScriptLogger {
       this.runId, // run_id
       this.startedAt, // started_at (ISO)
       this.finishedAt, // finished_at (isi saat finalize)
-      country, // ⟵ diisi POP vercel (syd1/cdg1/...) bila ada
+      country, // country or CF PoP code
       url, // url
       status, // status code
       cfCache, // cf_cache (Cloudflare)
       vcCache, // vercel_cache (x-vercel-cache)
       cfRay, // cf_ray
-      vercelId, // x-vercel-id (edge route)
       typeof responseMs === "number" ? responseMs : "", // response_ms
       error ? 1 : 0, // error (0/1)
       message, // message
@@ -95,11 +111,16 @@ class AppsScriptLogger {
     if (this.rows.length === 0) return;
 
     try {
-      const res = await axios.post(
-        APPS_SCRIPT_URL,
-        { sheetName: this.sheetName, rows: this.rows },
-        { timeout: 20000, headers: { "Content-Type": "application/json" } }
-      );
+      const payload = {
+        sheetName: this.sheetName,
+        headers: APPS_SHEET_HEADERS,
+        rows: this.rows,
+      };
+
+      const res = await axios.post(APPS_SCRIPT_URL, payload, {
+        timeout: 20000,
+        headers: { "Content-Type": "application/json" },
+      });
       console.log("Apps Script response:", res.status, res.data);
       if (!res.data?.ok) console.warn("Apps Script replied error:", res.data);
       this.rows = []; // bersihkan buffer
@@ -116,7 +137,7 @@ class AppsScriptLogger {
 /* ====== HTTP helper (proxy) ====== */
 function buildAxiosCfg(country, extra = {}) {
   const proxy = PROXIES[country];
-  const headers = { "User-Agent": USER_AGENTS[country] };
+  const headers = { "User-Agent": USER_AGENTS[country] || "CacheWarmer/1.0" };
 
   // siapkan agent + paksa Proxy-Authorization kalau ada user:pass
   let httpAgent, httpsAgent;
@@ -195,7 +216,7 @@ async function fetchUrlsFromSingleSitemap(domain, country) {
   }
 }
 
-/* ====== WARMING ====== */
+/* ====== WARMING (use cf-ray for edge/country) ====== */
 async function retryableGet(url, cfg, retries = 3) {
   let lastError = null;
   for (let i = 0; i < retries; i++) {
@@ -237,13 +258,6 @@ async function purgeCloudflareCache(url) {
   }
 }
 
-/* === Ambil POP vercel dari x-vercel-id (contoh: "syd1::iad1::xxxxx") === */
-function getVercelEdgePop(vercelIdHeader) {
-  if (typeof vercelIdHeader !== "string") return "N/A";
-  const parts = vercelIdHeader.split("::").filter(Boolean);
-  return parts[0] || "N/A"; // contoh: "syd1"
-}
-
 async function warmUrls(urls, country, logger, batchSize = 1, delay = 2000) {
   const batches = Array.from(
     { length: Math.ceil(urls.length / batchSize) },
@@ -265,16 +279,22 @@ async function warmUrls(urls, country, logger, batchSize = 1, delay = 2000) {
           const cfCache = res.headers["cf-cache-status"] || "N/A";
           const vcCache = res.headers["x-vercel-cache"] || "N/A";
           const cfRay = res.headers["cf-ray"] || "N/A";
-          const vercelId = res.headers["x-vercel-id"] || "N/A";
 
-          // Isi kolom country dgn POP vercel (syd1/cdg1/...), fallback ke label country lama
-          const edgePop = getVercelEdgePop(vercelId);
-          const countryTag = edgePop !== "N/A" ? edgePop : country;
+          // Extract CF edge PoP code (last segment after dash in cf-ray, e.g. "...-LHR")
+          let cfEdge = "N/A";
+          if (typeof cfRay === "string" && cfRay.includes("-")) {
+            const parts = cfRay.split("-");
+            cfEdge = parts[parts.length - 1] || "N/A";
+          }
+
+          // Prefer Cloudflare edge as 'country' tag; fallback to original label
+          const countryTag = cfEdge && cfEdge !== "N/A" ? cfEdge : country;
 
           console.log(
-            `[${countryTag}] ${res.status} cf=${cfCache} vercel=${vcCache} edge=${edgePop} - ${url}`
+            `[${countryTag}] ${res.status} cf=${cfCache} vercel=${vcCache} cf_edge=${cfEdge} - ${url}`
           );
 
+          // log WITHOUT vercelId column
           logger.log({
             country: countryTag,
             url,
@@ -282,7 +302,6 @@ async function warmUrls(urls, country, logger, batchSize = 1, delay = 2000) {
             cfCache,
             vcCache,
             cfRay,
-            vercelId,
             responseMs: dt,
             error: 0,
             message: "",

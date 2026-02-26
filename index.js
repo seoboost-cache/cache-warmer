@@ -115,7 +115,7 @@ class AppsScriptLogger {
       };
 
       const res = await axios.post(APPS_SCRIPT_URL, payload, {
-        timeout: 20000,
+        timeout: 60000,
         headers: { "Content-Type": "application/json" },
       });
 
@@ -223,60 +223,101 @@ async function retryableGet(url, cfg, retries = 3) {
   throw lastErr;
 }
 
-async function warmUrls(urls, country, logger) {
-  for (const url of urls) {
-    const t0 = Date.now();
-    try {
-      const res = await retryableGet(
-        url,
-        buildAxiosCfg(country, { timeout: 15000 }),
-        3
-      );
-
-      const dt = Date.now() - t0;
-
-      const cfCache = res.headers["cf-cache-status"] || "N/A";
-      const vcCache = res.headers["x-vercel-cache"] || "N/A";
-      const cfRay = res.headers["cf-ray"] || "N/A";
-      const vercelId = res.headers["x-vercel-id"] || "N/A";
-      const vercelEdge = getVercelEdgePop(vercelId);
-
-      // CF edge sebagai countryTag
-      let cfEdge = "N/A";
-      if (typeof cfRay === "string" && cfRay.includes("-")) {
-        const parts = cfRay.split("-");
-        cfEdge = parts[parts.length - 1];
+async function purgeCloudflareCache(url) {
+  if (!CLOUDFLARE_ZONE_ID || !CLOUDFLARE_API_TOKEN) return;
+  try {
+    const purgeRes = await axios.post(
+      `https://api.cloudflare.com/client/v4/zones/${CLOUDFLARE_ZONE_ID}/purge_cache`,
+      { files: [url] },
+      {
+        headers: {
+          Authorization: `Bearer ${CLOUDFLARE_API_TOKEN}`,
+          "Content-Type": "application/json",
+        },
       }
-
-      const countryTag = cfEdge !== "N/A" ? cfEdge : country;
-
-      console.log(
-        `[${countryTag}] ${res.status} cf=${cfCache} vc=${vcCache} cf_edge=${cfEdge} vercel_edge=${vercelEdge} - ${url}`
-      );
-
-      logger.log({
-        country: countryTag,
-        url,
-        status: res.status,
-        cfCache,
-        vcCache,
-        cfRay,
-        vercelEdge, // <-- save to sheet
-        responseMs: dt,
-        error: 0,
-        message: "",
-      });
-    } catch (err) {
-      const dt = Date.now() - t0;
-
-      logger.log({
-        country,
-        url,
-        responseMs: dt,
-        error: 1,
-        message: err?.message || "request failed",
-      });
+    );
+    if (purgeRes.data?.success) {
+      console.log(`✅ Cloudflare cache purged: ${url}`);
+    } else {
+      console.warn(`⚠️ Failed to purge Cloudflare: ${url}`);
     }
+  } catch {
+    console.warn(`❌ Error purging Cloudflare: ${url}`);
+  }
+}
+
+async function warmUrls(urls, country, logger, batchSize = 1, delay = 2000) {
+  const batches = Array.from(
+    { length: Math.ceil(urls.length / batchSize) },
+    (_, i) => urls.slice(i * batchSize, i * batchSize + batchSize)
+  );
+
+  for (const batch of batches) {
+    await Promise.all(
+      batch.map(async (url) => {
+        const t0 = Date.now();
+        try {
+          const res = await retryableGet(
+            url,
+            buildAxiosCfg(country, { timeout: 15000 }),
+            3
+          );
+          const dt = Date.now() - t0;
+
+          const cfCache = res.headers["cf-cache-status"] || "N/A";
+          const vcCache = res.headers["x-vercel-cache"] || "N/A";
+          const cfRay = res.headers["cf-ray"] || "N/A";
+          const vercelId = res.headers["x-vercel-id"] || "N/A";
+          const vercelEdge = getVercelEdgePop(vercelId);
+
+          // CF edge sebagai countryTag
+          let cfEdge = "N/A";
+          if (typeof cfRay === "string" && cfRay.includes("-")) {
+            const parts = cfRay.split("-");
+            cfEdge = parts[parts.length - 1] || "N/A";
+          }
+
+          const countryTag = cfEdge && cfEdge !== "N/A" ? cfEdge : country;
+
+          console.log(
+            `[${countryTag}] ${res.status} cf=${cfCache} vc=${vcCache} cf_edge=${cfEdge} vercel_edge=${vercelEdge} - ${url}`
+          );
+
+          logger.log({
+            country: countryTag,
+            url,
+            status: res.status,
+            cfCache,
+            vcCache,
+            cfRay,
+            vercelEdge,
+            responseMs: dt,
+            error: 0,
+            message: "",
+          });
+
+          // Purge Cloudflare cache if Vercel cache is not HIT
+          if (String(vcCache).toUpperCase() !== "HIT") {
+            await purgeCloudflareCache(url);
+          }
+        } catch (err) {
+          const dt = Date.now() - t0;
+          console.warn(
+            `[${country}] ❌ Failed to warm ${url}: ${err?.message || err}`
+          );
+
+          logger.log({
+            country,
+            url,
+            responseMs: dt,
+            error: 1,
+            message: err?.message || "request failed",
+          });
+        }
+      })
+    );
+
+    await sleep(delay);
   }
 }
 
